@@ -101,4 +101,3 @@ jobs:
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --body "$(printf '## 🤖 Gemini AI Cost & Architecture Review\n\n%s' "$(cat gemini.md)")"
-
