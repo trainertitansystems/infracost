@@ -2,10 +2,8 @@ name: Terraform Cost & AI Gate
 
 on:
   pull_request_target:
-    branches:
-      - main
-    paths:
-      - '**/*.tf'
+    branches: [ main ]
+    paths: [ '**/*.tf' ]
 
 permissions:
   contents: read
@@ -21,54 +19,52 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # Checkout PR code (REQUIRED for gh + terraform)
+      # Checkout PR code
       # --------------------------------------------------
-      - name: Checkout PR code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
 
       # --------------------------------------------------
-      # Terraform
+      # Terraform (EXACTLY like your local flow)
       # --------------------------------------------------
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init
+      - name: Terraform init
         run: terraform init -input=false
 
-      - name: Terraform Plan
+      - name: Terraform plan
         run: terraform plan -out=tfplan.binary
 
+      - name: Terraform plan to JSON
+        run: terraform show -json tfplan.binary > plan.json
+
       # --------------------------------------------------
-      # Infracost (plan-based, real GCP costs)
+      # Infracost (PLAN.JSON — THIS IS THE KEY)
       # --------------------------------------------------
-      - name: Setup Infracost
-        uses: infracost/actions/setup@v3
+      - uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
       - name: Run Infracost
         run: |
           infracost breakdown \
-            --terraform-plan-file=tfplan.binary \
+            --path plan.json \
             --format json \
             --out-file infracost.json
 
-      - name: Post Infracost comment
+      - name: Post Infracost comment (API, no git)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          infracost output \
-            --path infracost.json \
-            --format github-comment \
-            | gh pr comment ${{ github.event.pull_request.number }} --body-file -
+          body=$(infracost output --path infracost.json --format github-comment)
+          gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$body"
 
       # --------------------------------------------------
-      # Gemini AI (cost + GCP machine recommendations)
+      # Gemini AI (based on REAL costs + GCP machine types)
       # --------------------------------------------------
-      - name: Gemini AI cost optimization
+      - name: Gemini AI cost analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -80,30 +76,29 @@ jobs:
                 parts: [{
                   text: (
                     "You are a GCP Cloud Architect and FinOps expert.\n\n" +
-                    "Analyze this Terraform/Infracost report and provide:\n\n" +
+                    "Using this Infracost JSON, provide:\n\n" +
                     "1. Total monthly cost\n" +
-                    "2. Top cost-driving resources\n" +
-                    "3. GCP Compute Engine machine types used\n" +
-                    "4. Cheaper or more efficient alternatives (e2, n2, c2, custom)\n" +
-                    "5. Rightsizing, autoscaling, and CUD advice\n" +
-                    "6. Any cost or architecture risks before merge\n\n" +
-                    "Return concise markdown.\n\n" +
-                    "INFRACOST JSON:\n" + ($cost | tostring)
+                    "2. Cost of each resource\n" +
+                    "3. GCP machine type used (e.g. e2-small)\n" +
+                    "4. Cheaper or better alternatives (e2 vs n2 vs custom)\n" +
+                    "5. Disk and storage optimization suggestions\n" +
+                    "6. Any risks before merge\n\n" +
+                    "INFRACOST DATA:\n" + ($cost | tostring)
                   )
                 }]
               }]
-            }' > gemini_payload.json
+            }' > gemini.json
 
           curl -s \
             "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent?key=$GEMINI_API_KEY" \
             -H "Content-Type: application/json" \
-            -d @gemini_payload.json \
+            -d @gemini.json \
             | jq -r '.candidates[0].content.parts[0].text' > gemini.md
 
-      - name: Post Gemini AI comment
+      - name: Post Gemini comment (API, no git)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --body "$(printf '## 🤖 Gemini AI – GCP Cost Optimization\n\n%s' "$(cat gemini.md)")"
+          gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$(printf '## 🤖 Gemini AI – GCP Cost Review\n\n%s' "$(cat gemini.md)")"
 
