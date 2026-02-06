@@ -1,4 +1,4 @@
-name: Terraform Cost & AI Gate (GCP)
+name: Cost & AI Gate (Terraform + Infracost + Gemini)
 
 on:
   pull_request_target:
@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   cost-ai-gate:
-    name: cost-ai-gate
     runs-on: ubuntu-latest
 
     env:
@@ -22,7 +21,7 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # Checkout PR code safely
+      # Checkout PR code (this fixes the git error)
       # --------------------------------------------------
       - name: Checkout PR code
         uses: actions/checkout@v4
@@ -31,14 +30,11 @@ jobs:
           persist-credentials: false
 
       # --------------------------------------------------
-      # Terraform setup
+      # Terraform
       # --------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      # --------------------------------------------------
-      # Terraform init & plan (NO APPLY)
-      # --------------------------------------------------
       - name: Terraform Init
         run: terraform init -input=false
 
@@ -46,41 +42,33 @@ jobs:
         run: terraform plan -out=tfplan.binary
 
       # --------------------------------------------------
-      # Infracost setup
+      # Infracost
       # --------------------------------------------------
       - name: Setup Infracost
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
-      # --------------------------------------------------
-      # Infracost PLAN-BASED cost calculation (IMPORTANT)
-      # --------------------------------------------------
-      - name: Run Infracost against Terraform plan
+      - name: Run Infracost (plan-based)
         run: |
           infracost breakdown \
             --terraform-plan-file=tfplan.binary \
             --format json \
             --out-file infracost.json
 
-      - name: Generate Infracost PR comment
-        run: |
-          infracost output \
-            --path infracost.json \
-            --format github-comment \
-            --out-file infracost.md
-
       - name: Post Infracost comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --body-file infracost.md
+          infracost output \
+            --path infracost.json \
+            --format github-comment \
+            | gh pr comment ${{ github.event.pull_request.number }} --body-file -
 
       # --------------------------------------------------
-      # Gemini AI cost + GCP machine recommendations
+      # Gemini AI (GCP cost + machine type advice)
       # --------------------------------------------------
-      - name: Gemini AI cost optimization review
+      - name: Gemini AI cost review
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -92,14 +80,13 @@ jobs:
                 parts: [{
                   text: (
                     "You are a GCP Cloud Architect and FinOps expert.\n\n" +
-                    "Analyze this Terraform cost report and provide:\n\n" +
+                    "Analyze this Terraform cost report and provide:\n" +
                     "1. Total monthly cost\n" +
                     "2. Top cost-driving resources\n" +
-                    "3. GCP Compute Engine machine types used\n" +
-                    "4. Cheaper or more efficient alternative machine types\n" +
-                    "   (e.g. e2 vs n2 vs c2 vs custom)\n" +
-                    "5. Rightsizing and scaling recommendations\n" +
-                    "6. Any cost or architecture risks before merging\n\n" +
+                    "3. GCP machine types used\n" +
+                    "4. Cheaper or more efficient alternatives (e2, n2, c2, custom)\n" +
+                    "5. Rightsizing and scaling advice\n" +
+                    "6. Any cost or architecture risks before merge\n\n" +
                     "Return concise markdown.\n\n" +
                     "INFRACOST JSON:\n" + ($cost | tostring)
                   )
@@ -113,7 +100,7 @@ jobs:
             -d @gemini_payload.json \
             | jq -r '.candidates[0].content.parts[0].text' > gemini.md
 
-      - name: Post Gemini AI recommendations
+      - name: Post Gemini AI comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
