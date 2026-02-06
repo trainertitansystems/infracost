@@ -1,0 +1,6 @@
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+*.tfplan.binary
+plan.json
+infracost.json
