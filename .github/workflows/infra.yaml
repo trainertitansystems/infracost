@@ -1,8 +1,7 @@
-name: Main Branch Cost & AI Gates
+name: Terraform Cost & Gemini AI Review
 
 on:
   pull_request_target:
-    branches: [ main ]
     paths:
       - "**/*.tf"
 
@@ -11,19 +10,18 @@ permissions:
   pull-requests: write
 
 jobs:
-  # --------------------------------------------------
-  # 1️⃣ Infracost Gate (BLOCKING)
-  # --------------------------------------------------
-  infracost:
-    name: infracost-cost-gate
+  infracost-and-gemini:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout PR code safely
+      # Checkout PR code safely
+      - name: Checkout PR code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
+      # Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
@@ -36,51 +34,34 @@ jobs:
       - name: Export Terraform plan to JSON
         run: terraform show -json tfplan.binary > plan.json
 
+      # Infracost
       - name: Setup Infracost
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
-      - name: Run Infracost (REAL cost)
+      - name: Run Infracost
         run: |
           infracost breakdown \
             --path plan.json \
             --format json \
             --out-file infracost.json
 
-      - name: Generate Infracost PR comment
+      - name: Infracost PR Comment
         run: |
           infracost output \
             --path infracost.json \
-            --format github-comment > infracost.md
+            --format github-comment \
+            --out-file infracost.md
 
       - name: Post Infracost comment
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            -f body="$(cat infracost.md)"
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file infracost.md
 
-      - name: Upload Infracost artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: infracost-json
-          path: infracost.json
-
-  # --------------------------------------------------
-  # 2️⃣ Gemini AI Gate (BLOCKING)
-  # --------------------------------------------------
-  gemini:
-    name: gemini-ai-gate
-    runs-on: ubuntu-latest
-    needs: infracost
-
-    steps:
-      - name: Download Infracost artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: infracost-json
-
+      # Gemini AI
       - name: Build Gemini prompt
         run: |
           jq -n \
@@ -90,32 +71,34 @@ jobs:
                 role: "user",
                 parts: [{
                   text: (
-                    "You are a GCP Cloud Architect and FinOps expert.\n\n" +
+                    "You are a GCP FinOps and Cloud Architect.\n\n" +
                     "Analyze this Terraform cost report and provide:\n" +
-                    "1. Monthly cost summary\n" +
-                    "2. GCP machine types used\n" +
-                    "3. Cheaper machine alternatives\n" +
-                    "4. Disk and storage optimization\n" +
-                    "5. Any production risks\n\n" +
+                    "• Monthly cost summary\n" +
+                    "• Cost drivers\n" +
+                    "• Cheaper GCP machine alternatives\n" +
+                    "• Disk and storage optimizations\n" +
+                    "• Risks before deployment\n\n" +
+                    "Return concise markdown.\n\n" +
                     "COST DATA:\n" + ($cost | tostring)
                   )
                 }]
               }]
-            }' > gemini.json
+            }' > gemini_request.json
 
       - name: Call Gemini API
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           curl -s \
-            "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent?key=$GEMINI_API_KEY" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=$GEMINI_API_KEY" \
             -H "Content-Type: application/json" \
-            -d @gemini.json \
+            -d @gemini_request.json \
             | jq -r '.candidates[0].content.parts[0].text' > gemini.md
 
-      - name: Post Gemini AI recommendations
+      - name: Post Gemini AI review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            -f body="$(printf '## 🤖 Gemini AI – Main Branch Gate\n\n%s' "$(cat gemini.md)")"
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$(printf '## 🤖 Gemini AI Cost & Architecture Review\n\n%s' "$(cat gemini.md)")"
+
