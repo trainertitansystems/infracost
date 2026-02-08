@@ -15,62 +15,54 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ============================================================
-      # Checkout PR branch (NOT main)
-      # ============================================================
-      - name: Checkout PR code
+      # =====================================================
+      # Checkout PR code (THIS is the key)
+      # =====================================================
+      - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ============================================================
-      # Detect Terraform root STRICTLY from PR changes
-      # ============================================================
-      - name: Detect Terraform root directory
+      # =====================================================
+      # Detect Terraform directory from PR ONLY
+      # =====================================================
+      - name: Detect Terraform root
         id: tfdir
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "🔍 Detecting Terraform directories from PR diff..."
-
-          DIRS=$(git diff --name-only origin/main...HEAD \
+          DIR=$(git diff --name-only origin/main...HEAD \
             | grep '\.tf$' \
             | xargs -n1 dirname \
-            | sort -u)
+            | sort -u \
+            | head -n1)
 
-          echo "Changed directories:"
-          echo "$DIRS"
+          if [ -z "$DIR" ]; then
+            echo "❌ No Terraform changes in PR"
+            exit 1
+          fi
 
-          for d in $DIRS; do
-            if [ -f "$d/main.tf" ] || [ -f "$d/providers.tf" ]; then
-              if [ "$d" = "." ]; then
-                echo "❌ Terraform at repo root is forbidden"
-                exit 1
-              fi
-              echo "✅ Terraform root detected: $d"
-              echo "dir=$d" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
+          if [ "$DIR" = "." ]; then
+            echo "❌ Terraform at repo root is forbidden"
+            exit 1
+          fi
 
-          echo "❌ No valid Terraform root found in PR"
-          exit 1
+          echo "Terraform dir: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # HARD CLEAN — no cache, no reuse, no stale artifacts
-      # ============================================================
-      - name: Hard cleanup
-        shell: bash
+      # =====================================================
+      # HARD CLEAN — PR workspace only
+      # =====================================================
+      - name: Clean workspace
         run: |
-          set -e
           rm -rf .terraform **/.terraform
           rm -f **/tfplan.binary **/plan.json **/infracost.json
           rm -f **/cost.json **/gemini.json **/gemini_response.txt
 
-      # ============================================================
-      # Terraform (ISOLATED to PR directory)
-      # ============================================================
+      # =====================================================
+      # Terraform (PR directory only)
+      # =====================================================
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
@@ -82,13 +74,13 @@ jobs:
         working-directory: ${{ steps.tfdir.outputs.dir }}
         run: terraform plan -out=tfplan.binary -lock=false
 
-      - name: Export Terraform Plan JSON
+      - name: Export Plan JSON
         working-directory: ${{ steps.tfdir.outputs.dir }}
         run: terraform show -json tfplan.binary > plan.json
 
-      # ============================================================
-      # Infracost (fresh install every run)
-      # ============================================================
+      # =====================================================
+      # Infracost (PR-only plan)
+      # =====================================================
       - name: Setup Infracost
         uses: infracost/actions/setup@v3
         with:
@@ -102,9 +94,9 @@ jobs:
             --format json \
             --out-file infracost.json
 
-      # ============================================================
-      # STRICT cost classification (no guessing)
-      # ============================================================
+      # =====================================================
+      # Cost classification (NO guessing)
+      # =====================================================
       - name: Classify costs
         working-directory: ${{ steps.tfdir.outputs.dir }}
         run: |
@@ -123,9 +115,9 @@ jobs:
           }
           ' infracost.json > cost.json
 
-      # ============================================================
-      # Gemini prompt (NO hallucination allowed)
-      # ============================================================
+      # =====================================================
+      # Gemini (PR-only input)
+      # =====================================================
       - name: Build Gemini request
         working-directory: ${{ steps.tfdir.outputs.dir }}
         run: |
@@ -136,13 +128,12 @@ jobs:
               parts: [{
                 text:
 "🤖 Gemini AI FinOps Analysis\n\n"
-"RULES (MANDATORY):\n"
-"1. Analyze ONLY the resources provided below.\n"
-"2. DO NOT mention any resource not listed.\n"
-"3. Usage-based resources MUST be described EXACTLY as:\n"
-"   \"Usage-based – cost depends on traffic, data transfer, or consumption.\"\n"
-"4. DO NOT infer historical or previous pricing.\n"
-"5. If no fixed-cost resources exist, say:\n"
+"RULES:\n"
+"1. Analyze ONLY the resources below.\n"
+"2. Do NOT mention any resource not listed.\n"
+"3. Usage-based resources MUST be described as:\n"
+"   \"Usage-based – cost depends on consumption.\"\n"
+"4. If no fixed costs exist, say:\n"
 "   \"No fixed monthly costs detected.\"\n\n"
 "RESOURCES:\n" + ($data | tostring)
               }]
@@ -150,10 +141,7 @@ jobs:
           }
           ' > gemini.json
 
-      # ============================================================
-      # Gemini API call (fresh, no reuse)
-      # ============================================================
-      - name: Run Gemini AI
+      - name: Run Gemini
         working-directory: ${{ steps.tfdir.outputs.dir }}
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -165,10 +153,10 @@ jobs:
             | jq -r '.candidates[0].content.parts[0].text' \
             > gemini_response.txt
 
-      # ============================================================
-      # Post PR comment (always fresh)
-      # ============================================================
-      - name: Post FinOps comment
+      # =====================================================
+      # PR Comment
+      # =====================================================
+      - name: Comment on PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
