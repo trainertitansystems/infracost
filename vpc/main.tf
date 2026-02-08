@@ -1,5 +1,5 @@
 #terraform is just hcl
-it acts and dies
+#it acts and dies
 terraform {
   required_providers {
     google = {
