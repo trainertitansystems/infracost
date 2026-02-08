@@ -1,4 +1,3 @@
-# Captains are Indians and Australians
 
 terraform {
   required_providers {
